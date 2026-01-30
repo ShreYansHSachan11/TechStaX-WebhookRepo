@@ -19,23 +19,51 @@ A minimal event processing pipeline that captures GitHub repository events (Push
 
 ```
 webhook-repo/
-├── app.py                    # Flask application entry point
-├── webhook_handler.py        # Webhook processing logic
-├── database.py              # MongoDB connection and operations
-├── models.py                # Data models and validation
-├── logging_config.py        # Logging configuration
-├── static/                  # CSS, JavaScript files
-│   ├── css/
-│   │   └── style.css
-│   └── js/
-│       └── app.js
-├── templates/               # HTML templates
-│   └── index.html
+├── run.py                   # Flask application entry point
+├── app/                     # Application package
+│   ├── static/              # CSS, JavaScript files
+│   │   ├── css/
+│   │   │   └── style.css
+│   │   └── js/
+│   │       └── app.js
+│   ├── templates/           # HTML templates
+│   │   └── index.html
+│   └── webhook/             # Core webhook system modules
+│       ├── __init__.py      # Module initialization
+│       ├── webhook_handler.py  # Webhook processing logic
+│       ├── database.py      # MongoDB connection and operations
+│       ├── models.py        # Data models and validation
+│       ├── logging_config.py   # Logging configuration
+│       └── extensions.py    # Flask extensions
 ├── requirements.txt         # Python dependencies
 ├── .env.example            # Environment variables template
 ├── test_*.py               # Test files
 └── README.md               # This file
 ```
+
+### Architecture Overview
+
+The application follows a modular Flask structure:
+
+- **`run.py`**: Main entry point that creates and configures the Flask application
+- **`app/static/`**: Frontend assets (CSS for styling, JavaScript for 15-second polling)
+- **`app/templates/`**: HTML templates for the web interface
+- **`app/webhook/`**: Core webhook processing modules:
+  - `webhook_handler.py`: Processes GitHub webhook payloads
+  - `database.py`: MongoDB operations and connection management
+  - `models.py`: Data models for webhook events
+  - `logging_config.py`: Centralized logging configuration
+  - `extensions.py`: Flask extensions and utilities
+
+### User Interface Components
+
+The web interface provides real-time monitoring of GitHub webhook events:
+
+- **`app/templates/index.html`**: Main UI template displaying webhook events in a clean, responsive layout
+- **`app/static/css/style.css`**: Styling for the web interface with modern design and responsive layout
+- **`app/static/js/app.js`**: JavaScript for automatic polling every 15 seconds to fetch and display new events without page refresh
+
+The UI automatically updates to show new webhook events as they arrive, providing real-time visibility into repository activity.
 
 ## Prerequisites
 
@@ -108,7 +136,7 @@ sudo systemctl start mongod
 
 ```bash
 # Start the application
-python app.py
+python run.py
 
 # Check health endpoint
 curl http://localhost:5000/health
@@ -177,7 +205,7 @@ ngrok config add-authtoken YOUR_AUTHTOKEN_HERE
 
 ```bash
 # Start your Flask application first
-python app.py
+python run.py
 
 # In a new terminal, expose port 5000
 ngrok http 5000
@@ -206,7 +234,7 @@ Use the HTTPS URL (`https://abc123.ngrok.io/webhook`) as your GitHub webhook URL
 source venv/bin/activate  # or venv\Scripts\activate on Windows
 
 # Start Flask application
-python app.py
+python run.py
 
 # Application will be available at:
 # - Main UI: http://localhost:5000
@@ -273,6 +301,9 @@ curl -X POST http://localhost:5000/webhook \
 
 # Check events API
 curl http://localhost:5000/events
+
+# Test the web interface
+# Open http://localhost:5000 in your browser
 ```
 
 ## Troubleshooting
@@ -308,7 +339,7 @@ ModuleNotFoundError: No module named 'flask'
 KeyError: 'MONGODB_URI'
 ```
 - Verify `.env` file exists and contains required variables
-- Check file is in same directory as `app.py`
+- Check file is in same directory as `run.py`
 - Verify python-dotenv is installed
 
 ### Debug Mode
