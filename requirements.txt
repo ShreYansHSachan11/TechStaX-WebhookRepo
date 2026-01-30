@@ -1,0 +1,18 @@
+# Core Dependencies
+Flask==2.3.3
+PyMongo==4.5.0
+python-dotenv==1.0.0
+Werkzeug==2.3.7
+
+# Property-Based Testing
+Hypothesis==6.88.1
+
+# Development Dependencies (Optional)
+pytest==7.4.2
+pytest-cov==4.1.0
+
+# Production Dependencies (Optional)
+gunicorn==21.2.0
+
+# Security Dependencies (Optional)
+cryptography==41.0.7
