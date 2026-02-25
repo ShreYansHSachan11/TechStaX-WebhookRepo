@@ -10,5 +10,3 @@ Currently, the application uses minimal extensions to keep it lightweight.
 # from flask_cors import CORS
 # cors = CORS()
 
-# Currently no extensions are needed as CORS is handled manually
-# and the application uses minimal dependencies

@@ -1,0 +1,127 @@
+services:
+  # Flask Application
+  flask-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: webhook-flask-app
+    ports:
+      - "${FLASK_PORT:-5000}:5000"
+    environment:
+      - FLASK_PORT=5000
+      - FLASK_DEBUG=True
+      - FLASK_ENV=development
+      - SECRET_KEY=thisismyflasksecretkey
+      - MONGODB_URI=mongodb+srv://shreyansh:Shreyansh123@cluster0.yik2r6a.mongodb.net/?appName=Cluster0
+      - MONGODB_DATABASE=TechStax
+      - REDIS_URI=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - LOG_FILE_PATH=/app/logs/app.log
+      - LOG_LEVEL=INFO
+      - WEBHOOK_QUEUE_WORKERS=4
+      - WEBHOOK_QUEUE_MAX_SIZE=1000
+      - GITHUB_WEBHOOK_SECRET=thisismeshreyansh
+    volumes:
+      - ./logs:/app/logs
+      - ./app:/app/app
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - webhook-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Redis Message Broker
+  redis:
+    image: redis:7.2-alpine
+    container_name: webhook-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - webhook-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Celery Worker
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: webhook-celery-worker
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      - MONGODB_URI=mongodb+srv://shreyansh:Shreyansh123@cluster0.yik2r6a.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
+      - MONGODB_DATABASE=TechStax
+      - REDIS_URI=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - LOG_FILE_PATH=/app/logs/celery.log
+      - LOG_LEVEL=INFO
+      - SECRET_KEY=thisismyflasksecretkey
+    volumes:
+      - ./logs:/app/logs
+      - ./app:/app/app
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - webhook-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.celery_app", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Celery Beat Scheduler
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: webhook-celery-beat
+    command: celery -A app.celery_app beat --loglevel=info
+    environment:
+      - MONGODB_URI=mongodb+srv://shreyansh:Shreyansh123@cluster0.yik2r6a.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
+      - MONGODB_DATABASE=TechStax
+      - REDIS_URI=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - LOG_FILE_PATH=/app/logs/celery_beat.log
+      - LOG_LEVEL=INFO
+      - SECRET_KEY=thisismyflasksecretkey
+    volumes:
+      - ./logs:/app/logs
+      - ./app:/app/app
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - webhook-network
+    restart: unless-stopped
+
+# Docker Network
+networks:
+  webhook-network:
+    driver: bridge
+    name: webhook-network
+
+# Persistent Volumes
+volumes:
+  redis_data:
+    name: webhook_redis_data

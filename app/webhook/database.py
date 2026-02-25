@@ -5,13 +5,15 @@ This module handles MongoDB connection using PyMongo with connection pooling,
 error handling, and database/collection initialization.
 """
 
-import os
+import ssl
+import certifi
 from typing import List, Dict, Any, Optional
 from pymongo import MongoClient, DESCENDING
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, PyMongoError
 from pymongo.collection import Collection
 from pymongo.database import Database
 from .logging_config import get_logger, log_database_operation
+from app.config import Config
 
 # Get logger for this module
 logger = get_logger(__name__)
@@ -24,27 +26,9 @@ class DatabaseConnection:
         self._client: Optional[MongoClient] = None
         self._database: Optional[Database] = None
         self._collection: Optional[Collection] = None
-        self._connection_string = self._parse_connection_string()
-        self._database_name = os.getenv('MONGODB_DATABASE', 'webhook_system')
+        self._connection_string = Config.MONGODB_URI
+        self._database_name = Config.MONGODB_DATABASE
         
-    def _parse_connection_string(self) -> str:
-        """Parse MongoDB connection string from environment variables."""
-        connection_string = os.getenv('MONGODB_URI')
-        
-        if not connection_string:
-            # Fallback to individual components if MONGODB_URI is not set
-            host = os.getenv('MONGODB_HOST', 'localhost')
-            port = os.getenv('MONGODB_PORT', '27017')
-            database = os.getenv('MONGODB_DATABASE', 'webhook_system')
-            username = os.getenv('MONGODB_USERNAME')
-            password = os.getenv('MONGODB_PASSWORD')
-            
-            if username and password:
-                connection_string = f"mongodb://{username}:{password}@{host}:{port}/{database}"
-            else:
-                connection_string = f"mongodb://{host}:{port}/{database}"
-        
-        return connection_string
     
     def connect(self) -> bool:
         """
@@ -63,14 +47,16 @@ class DatabaseConnection:
             logger.info(f"Attempting to connect to MongoDB database: {self._database_name}")
             log_database_operation("connect", f"Connecting to database: {self._database_name}", logger, success=True)
             
-            # Create client with connection pooling settings
+            # Create client with connection pooling settings and SSL configuration
             self._client = MongoClient(
                 self._connection_string,
                 serverSelectionTimeoutMS=5000,  # 5 second timeout
                 maxPoolSize=10,  # Maximum 10 connections in pool
                 minPoolSize=1,   # Minimum 1 connection in pool
                 maxIdleTimeMS=30000,  # Close connections after 30 seconds idle
-                waitQueueTimeoutMS=5000  # Wait 5 seconds for connection from pool
+                waitQueueTimeoutMS=5000,  # Wait 5 seconds for connection from pool
+                tlsCAFile=certifi.where(),  # Use certifi certificates
+                tlsAllowInvalidCertificates=True  # Allow invalid certificates for Windows SSL compatibility
             )
             
             # Test the connection
@@ -89,17 +75,17 @@ class DatabaseConnection:
             return True
             
         except (ConnectionFailure, ServerSelectionTimeoutError) as e:
-            logger.error(f"MongoDB connection failed - server unreachable or timeout: {e}")
+            logger.error(f"MongoDB connection failed - server unreachable or timeout: {e}", exc_info=True)
             log_database_operation("connect", f"Connection failed - timeout/unreachable: {e}", logger, success=False)
             self._cleanup_failed_connection()
             return False
         except PyMongoError as e:
-            logger.error(f"MongoDB error during connection: {e}")
+            logger.error(f"MongoDB error during connection: {e}", exc_info=True)
             log_database_operation("connect", f"MongoDB error: {e}", logger, success=False)
             self._cleanup_failed_connection()
             return False
         except Exception as e:
-            logger.error(f"Unexpected error during MongoDB connection: {e}")
+            logger.error(f"Unexpected error during MongoDB connection: {e}", exc_info=True)
             log_database_operation("connect", f"Unexpected error: {e}", logger, success=False)
             self._cleanup_failed_connection()
             return False
@@ -110,7 +96,7 @@ class DatabaseConnection:
             try:
                 self._client.close()
             except Exception as e:
-                logger.warning(f"Error closing failed MongoDB client: {e}")
+                logger.warning(f"Error closing failed MongoDB client: {e}", exc_info=True)
             finally:
                 self._client = None
                 self._database = None
@@ -119,7 +105,7 @@ class DatabaseConnection:
     def _create_indexes(self):
         """Create database indexes for efficient querying."""
         try:
-            if not self._collection:
+            if self._collection is None:
                 logger.error("Cannot create indexes: collection not initialized")
                 return
                 
@@ -127,10 +113,10 @@ class DatabaseConnection:
             self._collection.create_index([("timestamp", DESCENDING)])
             logger.info("Database indexes created successfully")
         except PyMongoError as e:
-            logger.error(f"Failed to create database indexes: {e}")
+            logger.error(f"Failed to create database indexes: {e}", exc_info=True)
             # Don't fail the connection for index creation errors
         except Exception as e:
-            logger.error(f"Unexpected error creating indexes: {e}")
+            logger.error(f"Unexpected error creating indexes: {e}", exc_info=True)
     
     def disconnect(self):
         """Close the MongoDB connection."""
@@ -140,7 +126,7 @@ class DatabaseConnection:
                 logger.info("MongoDB connection closed successfully")
                 log_database_operation("disconnect", "Connection closed", logger, success=True)
             except Exception as e:
-                logger.error(f"Error closing MongoDB connection: {e}")
+                logger.error(f"Error closing MongoDB connection: {e}", exc_info=True)
                 log_database_operation("disconnect", f"Error closing connection: {e}", logger, success=False)
             finally:
                 self._client = None
@@ -208,10 +194,10 @@ class DatabaseConnection:
             return str(result.inserted_id)
             
         except PyMongoError as e:
-            logger.error(f"Database error inserting event: {e}")
+            logger.error(f"Database error inserting event: {e}", exc_info=True)
             return None
         except Exception as e:
-            logger.error(f"Unexpected error inserting event: {e}")
+            logger.error(f"Unexpected error inserting event: {e}", exc_info=True)
             return None
     
     def get_all_events(self) -> List[Dict[str, Any]]:
@@ -232,10 +218,49 @@ class DatabaseConnection:
             return events
             
         except PyMongoError as e:
-            logger.error(f"Database error retrieving events: {e}")
+            logger.error(f"Database error retrieving events: {e}", exc_info=True)
             return []
         except Exception as e:
-            logger.error(f"Unexpected error retrieving events: {e}")
+            logger.error(f"Unexpected error retrieving events: {e}", exc_info=True)
+            return []
+    
+    def get_recent_events(self, time_window_seconds: int = 15) -> List[Dict[str, Any]]:
+        """
+        Retrieve events from the last N seconds.
+        
+        Args:
+            time_window_seconds: Number of seconds to look back (default: 15)
+            
+        Returns:
+            List[Dict[str, Any]]: Events within time window, sorted by timestamp desc
+        """
+        if not self.is_connected():
+            logger.error("Cannot retrieve events: No database connection")
+            return []
+        
+        try:
+            from datetime import datetime, timedelta
+            
+            # Calculate cutoff time (UTC)
+            cutoff_time = datetime.utcnow() - timedelta(seconds=time_window_seconds)
+            cutoff_iso = cutoff_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            
+            # Query events where timestamp >= cutoff_time
+            query = {"timestamp": {"$gte": cutoff_iso}}
+            events = list(
+                self._collection
+                .find(query, {'_id': 0})
+                .sort("timestamp", DESCENDING)
+            )
+            
+            logger.info(f"Retrieved {len(events)} events from last {time_window_seconds}s")
+            return events
+            
+        except PyMongoError as e:
+            logger.error(f"Database error retrieving recent events: {e}", exc_info=True)
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error retrieving recent events: {e}", exc_info=True)
             return []
 
 

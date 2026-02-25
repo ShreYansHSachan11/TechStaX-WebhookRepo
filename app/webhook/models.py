@@ -10,6 +10,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, Any, Optional
 import re
+import logging
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
 
 
 class EventAction(Enum):
@@ -162,6 +166,8 @@ class WebhookEvent:
         if isinstance(timestamp, str):
             # Parse ISO 8601 timestamp string
             timestamp = cls._parse_iso8601_timestamp(timestamp)
+            if timestamp is None:
+                raise ValueError(f"Failed to parse timestamp: {data['timestamp']}")
         elif not isinstance(timestamp, datetime):
             raise ValueError("timestamp must be a datetime object or ISO 8601 string")
         
@@ -175,7 +181,7 @@ class WebhookEvent:
         )
     
     @staticmethod
-    def _parse_iso8601_timestamp(timestamp_str: str) -> datetime:
+    def _parse_iso8601_timestamp(timestamp_str: str) -> Optional[datetime]:
         """
         Parse ISO 8601 timestamp string to datetime object.
         
@@ -183,26 +189,38 @@ class WebhookEvent:
             timestamp_str: ISO 8601 timestamp string
             
         Returns:
-            datetime: Parsed datetime object
-            
-        Raises:
-            ValueError: If timestamp string is invalid
+            datetime: Parsed datetime object, or None if parsing fails
         """
-        # Handle various ISO 8601 formats
-        formats = [
-            "%Y-%m-%dT%H:%M:%SZ",           # 2021-04-01T21:30:00Z
-            "%Y-%m-%dT%H:%M:%S.%fZ",        # 2021-04-01T21:30:00.123456Z
-            "%Y-%m-%dT%H:%M:%S",            # 2021-04-01T21:30:00
-            "%Y-%m-%dT%H:%M:%S.%f",         # 2021-04-01T21:30:00.123456
-        ]
-        
-        for fmt in formats:
-            try:
-                return datetime.strptime(timestamp_str, fmt)
-            except ValueError:
-                continue
-        
-        raise ValueError(f"Invalid ISO 8601 timestamp format: {timestamp_str}")
+        try:
+            # Handle various ISO 8601 formats
+            formats = [
+                "%Y-%m-%dT%H:%M:%SZ",           # 2021-04-01T21:30:00Z
+                "%Y-%m-%dT%H:%M:%S.%fZ",        # 2021-04-01T21:30:00.123456Z
+                "%Y-%m-%dT%H:%M:%S",            # 2021-04-01T21:30:00
+                "%Y-%m-%dT%H:%M:%S.%f",         # 2021-04-01T21:30:00.123456
+                "%Y-%m-%dT%H:%M:%S%z",          # 2026-01-30T17:40:47+05:30
+                "%Y-%m-%dT%H:%M:%S.%f%z",       # 2026-01-30T17:40:47.123456+05:30
+            ]
+            
+            for fmt in formats:
+                try:
+                    parsed_dt = datetime.strptime(timestamp_str, fmt)
+                    # Convert timezone-aware datetime to UTC naive datetime
+                    if parsed_dt.tzinfo is not None:
+                        utc_dt = parsed_dt.utctimetuple()
+                        return datetime(*utc_dt[:6])
+                    return parsed_dt
+                except ValueError:
+                    continue
+            
+            # If no format matched, log error and return None
+            logger.error(f"Unable to parse timestamp with any known format: {timestamp_str}")
+            return None
+            
+        except Exception as e:
+            # Catch any unexpected errors during parsing
+            logger.error(f"Error parsing timestamp {timestamp_str}: {e}", exc_info=True)
+            return None
     
     def __str__(self) -> str:
         """String representation of the webhook event."""

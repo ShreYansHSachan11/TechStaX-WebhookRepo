@@ -3,6 +3,12 @@ Flask==2.3.3
 PyMongo==4.5.0
 python-dotenv==1.0.0
 Werkzeug==2.3.7
+requests==2.31.0
+
+# Celery and Message Broker
+celery==5.3.4
+redis==5.0.1
+kombu==5.3.4
 
 # Property-Based Testing
 Hypothesis==6.88.1

@@ -20,15 +20,17 @@ Environment Variables:
 import os
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Import configuration module (loads and validates config on import)
+from app.config import Config
 
 # Import webhook system modules
 from app.webhook import (
     setup_logging, get_logger, get_webhook_handler, 
     initialize_database, get_database_connection
+)
+from app.webhook.queue_processor import (
+    initialize_webhook_queue, get_webhook_queue, shutdown_webhook_queue
 )
 
 def create_app():
@@ -46,13 +48,22 @@ def create_app():
     # Configure the application
     configure_app(app)
     
-    # Initialize logging
+    # Initialize logging using centralized config
     setup_logging()
     logger = get_logger(__name__)
     
     # Initialize database
     if not initialize_database():
         logger.error("Database initialization failed")
+    
+    # Initialize webhook queue with background workers using centralized config
+    initialize_webhook_queue(max_size=Config.WEBHOOK_QUEUE_MAX_SIZE, num_workers=Config.WEBHOOK_QUEUE_WORKERS)
+    logger.info(f"Webhook queue initialized with {Config.WEBHOOK_QUEUE_WORKERS} workers and max size {Config.WEBHOOK_QUEUE_MAX_SIZE}")
+    
+    # Register shutdown handler to drain queue on app termination
+    import atexit
+    atexit.register(lambda: shutdown_webhook_queue(timeout=30))
+    logger.info("Registered shutdown handler for webhook queue")
     
     # Register routes
     register_routes(app)
@@ -61,49 +72,18 @@ def create_app():
     return app
 
 def configure_app(app):
-    """Configure Flask application settings."""
-    # Validate required environment variables
-    required_vars = ['MONGODB_URI', 'MONGODB_DATABASE', 'SECRET_KEY']
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    """Configure Flask application settings using centralized config."""
+    # Configuration validation already done in Config.load()
+    # Print configuration summary
+    Config.print_summary()
     
-    if missing_vars:
-        print("❌ Configuration Validation Failed")
-        print("=" * 50)
-        print()
-        print("🚫 Missing Required Environment Variables:")
-        for var in missing_vars:
-            descriptions = {
-                'MONGODB_URI': 'MongoDB connection string',
-                'MONGODB_DATABASE': 'MongoDB database name', 
-                'SECRET_KEY': 'Flask secret key for session security'
-            }
-            print(f"  - {var}: {descriptions.get(var, 'Required configuration')}")
-        print()
-        print("Please copy .env.example to .env and configure the required variables.")
-        print()
-        print("📖 See README.md for detailed setup instructions.")
-        print("=" * 50)
-        exit(1)
-    
-    # Configuration validation passed
-    print("✅ Configuration validation passed")
-    print("📋 Configuration Summary:")
-    print(f"  - MONGODB_DATABASE: {os.getenv('MONGODB_DATABASE')}")
-    print(f"  - FLASK_DEBUG: {os.getenv('FLASK_DEBUG', 'false').lower()}")
-    print(f"  - FLASK_PORT: {os.getenv('FLASK_PORT', '5000')}")
-    print(f"  - FLASK_ENV: {os.getenv('FLASK_ENV', 'development')}")
-    print(f"  - LOG_LEVEL: {os.getenv('LOG_LEVEL', 'INFO')}")
-    print(f"  - GITHUB_WEBHOOK_SECRET_SET: {'Yes' if os.getenv('GITHUB_WEBHOOK_SECRET') else 'No'}")
-    print()
-    
-    # Flask configuration
-    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
-    app.config['DEBUG'] = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
+    # Flask configuration using centralized config
+    app.config['SECRET_KEY'] = Config.SECRET_KEY
+    app.config['DEBUG'] = Config.FLASK_DEBUG
     
     # Optional configurations
-    max_content_length = os.getenv('MAX_CONTENT_LENGTH')
-    if max_content_length:
-        app.config['MAX_CONTENT_LENGTH'] = int(max_content_length)
+    if Config.MAX_CONTENT_LENGTH:
+        app.config['MAX_CONTENT_LENGTH'] = Config.MAX_CONTENT_LENGTH
 
 def register_routes(app):
     """Register all application routes."""
@@ -142,46 +122,78 @@ def register_routes(app):
         logger.info("Received webhook request")
         
         try:
-            # Get database connection
-            db_conn = get_database_connection()
-            if not db_conn or not db_conn.is_connected():
-                logger.error("Database connection unavailable")
+            # Get event type from header
+            event_type = request.headers.get('X-GitHub-Event')
+            if not event_type:
+                logger.warning("Missing X-GitHub-Event header")
                 return jsonify({
                     "status": "error",
-                    "message": "Database connection unavailable"
-                }), 500
+                    "message": "Missing X-GitHub-Event header"
+                }), 400
             
-            # Process webhook using webhook handler
-            webhook_handler = get_webhook_handler()
-            event, status_code, message = webhook_handler.process_webhook(request)
-            
-            if event is None:
-                logger.warning(f"Webhook processing failed: {message}")
-                return jsonify({
-                    "status": "error" if status_code >= 400 else "success",
-                    "message": message
-                }), status_code
-            
-            # Store event in database
-            event_dict = event.to_dict()
-            event_id = db_conn.insert_event(event_dict)
-            
-            if event_id is None:
-                logger.error("Failed to store event in database")
+            # Wrap payload parsing in try-except block (Requirement 6.1)
+            try:
+                payload = request.get_json()
+                if not payload:
+                    logger.error("Invalid JSON payload")
+                    return jsonify({
+                        "status": "error",
+                        "message": "Invalid or empty JSON payload"
+                    }), 400
+            except Exception as parse_error:
+                logger.error(f"Error parsing webhook payload: {parse_error}", exc_info=True)
                 return jsonify({
                     "status": "error",
-                    "message": "Failed to store event in database"
+                    "message": "Failed to parse JSON payload"
+                }), 400
+            
+            # Get webhook queue
+            webhook_queue = get_webhook_queue()
+            if not webhook_queue:
+                logger.error("Webhook queue not initialized")
+                return jsonify({
+                    "status": "error",
+                    "message": "Webhook processing system unavailable"
+                }), 503
+            
+            # Wrap queue operations in try-except block (Requirement 6.4)
+            try:
+                enqueued = webhook_queue.enqueue(payload, event_type)
+                
+                if not enqueued:
+                    logger.warning(f"Failed to enqueue {event_type} event - queue may be full")
+                    return jsonify({
+                        "status": "error",
+                        "message": "Webhook queue is full, please retry later"
+                    }), 503
+            except Exception as queue_error:
+                logger.error(f"Error enqueuing to webhook queue: {queue_error}", exc_info=True)
+                return jsonify({
+                    "status": "error",
+                    "message": "Failed to enqueue webhook for processing"
                 }), 500
             
-            logger.info(f"Successfully processed and stored {event.action.value} event")
+            # Wrap Celery task enqueuing in try-except block (Requirement 6.4)
+            try:
+                from app.celery_app import process_webhook_task
+                task = process_webhook_task.delay(payload, event_type)
+                logger.info(f"Successfully enqueued Celery task for {event_type} event - Task ID: {task.id}")
+            except Exception as celery_error:
+                # Log Celery connection error but don't fail the request
+                # Thread queue processing will still handle the webhook
+                logger.error(f"Failed to enqueue Celery task: {celery_error}", exc_info=True)
+                logger.warning("Webhook will be processed via thread queue only")
+            
+            # Return immediate success response without blocking (Requirement 6.8)
+            logger.info(f"Successfully enqueued {event_type} event for async processing")
             return jsonify({
                 "status": "success",
-                "message": "Webhook processed and stored successfully",
-                "event_id": str(event_id)
+                "message": "Webhook received and queued for processing"
             }), 200
             
         except Exception as e:
-            logger.error(f"Unexpected error processing webhook: {e}")
+            # Return safe HTTP error response on exceptions (Requirement 6.8)
+            logger.error(f"Unexpected error processing webhook: {e}", exc_info=True)
             return jsonify({
                 "status": "error",
                 "message": "Internal server error"
@@ -189,7 +201,7 @@ def register_routes(app):
     
     @app.route('/events', methods=['GET'])
     def events():
-        """Get all webhook events for UI display."""
+        """Get webhook events from the last 15 seconds for UI display."""
         logger.info("Received request for events")
         
         try:
@@ -209,8 +221,8 @@ def register_routes(app):
                 response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
                 return response, 503
             
-            # Retrieve events from database
-            events_data = db_conn.get_all_events()
+            # Retrieve events from last 15 seconds (time-windowed filtering)
+            events_data = db_conn.get_recent_events(15)
             event_count = len(events_data)
             
             logger.info(f"Successfully returned {event_count} events")
@@ -251,6 +263,84 @@ def register_routes(app):
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
         return response, 200
     
+    @app.route('/task/<task_id>', methods=['GET'])
+    def task_status(task_id):
+        """
+        Get Celery task status and result.
+        
+        Query the Celery result backend for task status, result, and error information.
+        
+        Args:
+            task_id: Celery task ID from the URL path
+            
+        Returns:
+            JSON response with task status, result, and error information
+            
+        Requirements: 3.10
+        """
+        logger.info(f"Received request for task status: {task_id}")
+        
+        try:
+            from app.celery_app import celery_app
+            from celery.result import AsyncResult
+            
+            # Query Celery result backend for task status
+            task_result = AsyncResult(task_id, app=celery_app)
+            
+            # Build response based on task state
+            response_data = {
+                "task_id": task_id,
+                "status": task_result.state,
+                "result": None,
+                "error": None,
+                "traceback": None
+            }
+            
+            # Add result or error information based on state
+            if task_result.state == 'PENDING':
+                # Task is waiting to be executed
+                response_data["message"] = "Task is pending execution"
+                
+            elif task_result.state == 'STARTED':
+                # Task has been started
+                response_data["message"] = "Task is currently executing"
+                
+            elif task_result.state == 'SUCCESS':
+                # Task completed successfully
+                response_data["result"] = task_result.result
+                response_data["message"] = "Task completed successfully"
+                
+            elif task_result.state == 'FAILURE':
+                # Task failed with an exception
+                response_data["error"] = str(task_result.info)
+                response_data["traceback"] = task_result.traceback
+                response_data["message"] = "Task failed with an error"
+                
+            elif task_result.state == 'RETRY':
+                # Task is being retried
+                response_data["error"] = str(task_result.info)
+                response_data["message"] = "Task is being retried after failure"
+                
+            elif task_result.state == 'REVOKED':
+                # Task was revoked/cancelled
+                response_data["message"] = "Task was revoked"
+                
+            else:
+                # Unknown state
+                response_data["message"] = f"Task is in state: {task_result.state}"
+            
+            logger.info(f"Task {task_id} status: {task_result.state}")
+            
+            return jsonify(response_data), 200
+            
+        except Exception as e:
+            logger.error(f"Error retrieving task status for {task_id}: {e}", exc_info=True)
+            return jsonify({
+                "status": "error",
+                "message": "Failed to retrieve task status",
+                "task_id": task_id
+            }), 500
+    
     @app.errorhandler(404)
     def not_found(error):
         """Handle 404 errors."""
@@ -274,16 +364,16 @@ def main():
     # Create Flask application
     app = create_app()
     
-    # Get configuration from environment
-    debug = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
-    port = int(os.getenv('FLASK_PORT', 5000))
-    host = os.getenv('FLASK_HOST', '127.0.0.1')
+    # Get configuration from centralized config
+    debug = Config.FLASK_DEBUG
+    port = Config.FLASK_PORT
+    host = Config.FLASK_HOST
     
     # Start the application
     print(f"🚀 Starting GitHub Webhook System on http://{host}:{port}")
     print(f"📊 Debug mode: {'enabled' if debug else 'disabled'}")
-    print(f"🌐 Access the UI at: http://{host}:{port}")
-    print(f"🔗 Webhook endpoint: http://{host}:{port}/webhook")
+    print(f"🌐 Access the UI at: http://localhost:{port}")
+    print(f"🔗 Webhook endpoint: http://localhost:{port}/webhook")
     print("Press Ctrl+C to stop the server")
     
     app.run(

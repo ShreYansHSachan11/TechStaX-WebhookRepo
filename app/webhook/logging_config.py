@@ -10,20 +10,78 @@ import logging.handlers
 import os
 import sys
 from datetime import datetime
+from app.config import Config
 
 
-def setup_logging():
+class StructuredFormatter(logging.Formatter):
     """
-    Set up structured logging configuration for the application.
+    Custom formatter for structured log output.
     
-    Configures logging with:
-    - Structured log format with timestamps, levels, and context
-    - Console handler for development
-    - File handler for production (optional)
-    - Appropriate log levels based on environment
+    Formats log records with the structure:
+    YYYY-MM-DD HH:MM:SS | LEVEL | module_name | message
     """
-    # Get log level from environment (default to INFO)
-    log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
+    
+    def format(self, record: logging.LogRecord) -> str:
+        """
+        Format log record with structured format.
+        
+        Args:
+            record: Log record to format
+            
+        Returns:
+            str: Formatted log string in the format:
+                 YYYY-MM-DD HH:MM:SS | LEVEL | module_name | message
+        """
+        # Format timestamp
+        timestamp = datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Get log level
+        level = record.levelname
+        
+        # Get module name
+        module = record.name
+        
+        # Get message
+        message = record.getMessage()
+        
+        # Add exception info if present
+        if record.exc_info:
+            message += '\n' + self.formatException(record.exc_info)
+        
+        # Construct structured log line
+        return f"{timestamp} | {level} | {module} | {message}"
+
+
+def setup_logging(
+    log_file: str = None,
+    log_level: str = None,
+    max_bytes: int = None,
+    backup_count: int = None
+) -> None:
+    """
+    Configure structured file-based logging for the application.
+    
+    Args:
+        log_file: Path to log file (default: from Config.LOG_FILE_PATH)
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+                  (default: from Config.LOG_LEVEL)
+        max_bytes: Max log file size before rotation in bytes (default: from Config.LOG_MAX_BYTES)
+        backup_count: Number of backup log files to keep (default: from Config.LOG_BACKUP_COUNT)
+    """
+    # Get configuration from centralized config with fallbacks
+    if log_file is None:
+        log_file = Config.LOG_FILE_PATH
+    
+    if log_level is None:
+        log_level = Config.LOG_LEVEL
+    
+    if max_bytes is None:
+        max_bytes = Config.LOG_MAX_BYTES
+    
+    if backup_count is None:
+        backup_count = Config.LOG_BACKUP_COUNT
+    
+    # Validate log level
     log_levels = {
         'DEBUG': logging.DEBUG,
         'INFO': logging.INFO,
@@ -31,57 +89,47 @@ def setup_logging():
         'ERROR': logging.ERROR,
         'CRITICAL': logging.CRITICAL
     }
-    log_level = log_levels.get(log_level_str, logging.INFO)
+    log_level_int = log_levels.get(log_level, logging.INFO)
     
-    # Create structured log format
-    log_format = (
-        '%(asctime)s - %(name)s - %(levelname)s - '
-        '[%(filename)s:%(lineno)d] - %(message)s'
-    )
-    
-    # Create formatter
-    formatter = logging.Formatter(
-        fmt=log_format,
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    # Create structured formatter
+    formatter = StructuredFormatter()
     
     # Configure root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
+    root_logger.setLevel(log_level_int)
     
     # Remove existing handlers to avoid duplicates
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
-    # Console handler for all environments
+    # Create log directory if it doesn't exist
+    log_dir = os.path.dirname(log_file)
+    if log_dir and not os.path.exists(log_dir):
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except Exception as e:
+            print(f"Failed to create log directory {log_dir}: {e}", file=sys.stderr)
+            return
+    
+    # Rotating file handler for application logs
+    try:
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=max_bytes,
+            backupCount=backup_count
+        )
+        file_handler.setLevel(log_level_int)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+    except Exception as e:
+        print(f"Failed to set up file logging: {e}", file=sys.stderr)
+        return
+    
+    # Console handler for development/debugging
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(log_level)
+    console_handler.setLevel(log_level_int)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
-    
-    # File handler for production (optional)
-    log_file = os.getenv('LOG_FILE')
-    if log_file:
-        try:
-            # Create log directory if it doesn't exist
-            log_dir = os.path.dirname(log_file)
-            if log_dir and not os.path.exists(log_dir):
-                os.makedirs(log_dir, exist_ok=True)
-            
-            # Rotating file handler to prevent large log files
-            file_handler = logging.handlers.RotatingFileHandler(
-                log_file,
-                maxBytes=10 * 1024 * 1024,  # 10MB
-                backupCount=5
-            )
-            file_handler.setLevel(log_level)
-            file_handler.setFormatter(formatter)
-            root_logger.addHandler(file_handler)
-            
-            logging.info(f"File logging enabled: {log_file}")
-            
-        except Exception as e:
-            logging.error(f"Failed to set up file logging: {e}")
     
     # Set specific log levels for third-party libraries
     logging.getLogger('pymongo').setLevel(logging.WARNING)
@@ -91,10 +139,40 @@ def setup_logging():
     # Log startup information
     logging.info("=" * 50)
     logging.info("GitHub Webhook System - Logging Initialized")
-    logging.info(f"Log Level: {log_level_str}")
+    logging.info(f"Log Level: {log_level}")
+    logging.info(f"Log File: {log_file}")
+    logging.info(f"Max Bytes: {max_bytes}")
+    logging.info(f"Backup Count: {backup_count}")
     logging.info(f"Python Version: {sys.version}")
     logging.info(f"Startup Time: {datetime.now().isoformat()}")
     logging.info("=" * 50)
+
+
+def setup_celery_logging(
+    log_file: str = None,
+    log_level: str = None,
+    max_bytes: int = None,
+    backup_count: int = None
+) -> None:
+    """
+    Configure structured file-based logging for Celery workers.
+    
+    This function is similar to setup_logging() but uses a separate log file
+    for Celery worker logs to keep them separate from Flask application logs.
+    
+    Args:
+        log_file: Path to Celery log file (default: from Config.CELERY_LOG_FILE_PATH)
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+                  (default: from Config.LOG_LEVEL)
+        max_bytes: Max log file size before rotation in bytes (default: from Config.LOG_MAX_BYTES)
+        backup_count: Number of backup log files to keep (default: from Config.LOG_BACKUP_COUNT)
+    """
+    # Get configuration from centralized config with fallbacks
+    if log_file is None:
+        log_file = Config.CELERY_LOG_FILE_PATH
+    
+    # Use the same setup_logging function with Celery-specific log file
+    setup_logging(log_file=log_file, log_level=log_level, max_bytes=max_bytes, backup_count=backup_count)
 
 
 def get_logger(name: str) -> logging.Logger:
